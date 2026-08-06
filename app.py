@@ -77,7 +77,7 @@ def webhook():
     total_past_due = total_legal_fees_and_expenses + principal_balance - total_payments
 
     update_payload = {
-        "matter": {
+        "data": {
             "custom_field_values_attributes": [
                 {"id": 23054825, "value": total_legal_fees_and_expenses},
                 {"id": 22808180, "value": total_past_due}
