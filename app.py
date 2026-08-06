@@ -22,6 +22,11 @@ def webhook():
     if request.method == "GET":
         return "Webhook service is live", 200
 
+    # Handle Clio's webhook activation handshake
+    hook_secret = request.headers.get("X-Hook-Secret")
+    if hook_secret:
+        return "", 200, {"X-Hook-Secret": hook_secret}
+
     event_data = request.json
     print("Received webhook event:", event_data)
     
@@ -45,7 +50,6 @@ def webhook():
         "Content-Type": "application/json"
     }
 
-    # 1. Fetch Matter details to retrieve current custom field values
     matter_res = requests.get(f"https://app.clio.com/api/v4/matters/{matter_id}.json?expand=custom_field_values", headers=headers).json()
     matter_data = matter_res.get("data", {})
     custom_fields = matter_data.get("custom_field_values", [])
@@ -61,21 +65,17 @@ def webhook():
     principal_balance = get_cf_value(22619285)
     publication_costs = get_cf_value(23054810)
 
-    # 2. Fetch billable activities for the matter
     activities_res = requests.get(f"https://app.clio.com/api/v4/activities.json?matter_id={matter_id}", headers=headers).json()
     activities = activities_res.get("data", [])
     total_activities = sum(float(act.get("total", 0)) for act in activities)
 
-    # 3. Fetch bills / payments for the matter
     bills_res = requests.get(f"https://app.clio.com/api/v4/bills.json?matter_id={matter_id}", headers=headers).json()
     bills = bills_res.get("data", [])
     total_payments = sum(float(bill.get("paid", 0)) for bill in bills)
 
-    # 4. Calculations
     total_legal_fees_and_expenses = publication_costs + total_activities
     total_past_due = total_legal_fees_and_expenses + principal_balance - total_payments
 
-    # 5. Push updated values back to Clio Matter custom fields
     update_payload = {
         "matter": {
             "custom_field_values_attributes": [
