@@ -9,7 +9,7 @@ CLIENT_ID = os.environ.get("CLIO_CLIENT_ID", "QqAqrSWKBubre7WFcAoqoUmAv4qODQWBtg
 CLIENT_SECRET = os.environ.get("CLIO_CLIENT_SECRET", "xeRvTCO2oiWrbUaYf4J0vTC6Sd8wkYO04fBR85Eo")
 REFRESH_TOKEN = os.environ.get("CLIO_REFRESH_TOKEN", "ZXbPestqTIiI0oVoc4TTxghmvhCynB3OQmeSy0of")
 
-# Hardcoded Custom Field IDs
+# Hardcoded Custom Field Definition IDs
 PRINCIPAL_BALANCE_ID = "22619285"
 PUBLICATION_COSTS_ID = "23054810"
 TOTAL_LEGAL_FEES_ID = "23054825"
@@ -61,7 +61,8 @@ def handle_webhook():
             if access_token:
                 headers = {"Authorization": f"Bearer {access_token}"}
                 
-                matter_url = f"https://app.clio.com/api/v4/matters/{matter_id}.json?fields=id,display_number,custom_field_values{{id,value}}"
+                # Fetch matter data including the nested custom field definition ID
+                matter_url = f"https://app.clio.com/api/v4/matters/{matter_id}.json?fields=id,display_number,custom_field_values{{id,value,custom_field{{id}}}}"
                 matter_res = requests.get(matter_url, headers=headers)
                 
                 if matter_res.status_code == 200:
@@ -74,17 +75,18 @@ def handle_webhook():
                     publication_costs = 0.0
                     
                     for field in custom_fields:
-                        field_id = str(field.get("id"))
+                        custom_field_meta = field.get("custom_field", {})
+                        field_def_id = str(custom_field_meta.get("id"))
                         field_value = field.get("value")
                         
-                        print(f"Field ID: {field_id} | Value: {field_value}", flush=True)
+                        print(f"Field Def ID: {field_def_id} | Value: {field_value}", flush=True)
                         
-                        if field_id == PRINCIPAL_BALANCE_ID:
+                        if field_def_id == PRINCIPAL_BALANCE_ID:
                             try:
                                 principal_balance = float(field_value) if field_value else 0.0
                             except ValueError:
                                 principal_balance = 0.0
-                        elif field_id == PUBLICATION_COSTS_ID:
+                        elif field_def_id == PUBLICATION_COSTS_ID:
                             try:
                                 publication_costs = float(field_value) if field_value else 0.0
                             except ValueError:
@@ -93,6 +95,7 @@ def handle_webhook():
                     calculated_total = principal_balance + publication_costs
                     print(f"Calculated Total Balance: {calculated_total}", flush=True)
                     
+                    # Clio API requires the 'data' root wrapper for PATCH request bodies
                     updates = [
                         {"id": TOTAL_LEGAL_FEES_ID, "value": str(calculated_total)},
                         {"id": TOTAL_PAST_DUE_ID, "value": str(calculated_total)}
@@ -101,7 +104,7 @@ def handle_webhook():
                     if updates:
                         patch_url = f"https://app.clio.com/api/v4/matters/{matter_id}.json"
                         patch_payload = {
-                            "matter": {
+                            "data": {
                                 "custom_field_values": updates
                             }
                         }
