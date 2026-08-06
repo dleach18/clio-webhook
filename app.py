@@ -1,80 +1,112 @@
 import os
-from flask import Flask, request, jsonify
 import requests
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-ACCESS_TOKEN = os.environ.get("CLIO_ACCESS_TOKEN")
-PUBLICATION_COSTS_FIELD_ID = int(os.environ.get("PUBLICATION_COSTS_FIELD_ID", 0))
-TOTAL_LEGAL_FEES_EXPENSES_FIELD_ID = int(os.environ.get("TOTAL_LEGAL_FEES_EXPENSES_FIELD_ID", 0))
-
-BASE_URL = "https://app.clio.com/api/v4"
-HEADERS = {
-    "Authorization": f"Bearer {ACCESS_TOKEN}",
-    "Content-Type": "application/json"
+# Hardcoded custom field IDs for your Clio account
+FIELD_IDS = {
+    "principal_balance": "22619285",
+    "interest": "22639280",
+    "total_payments": "22619375",
+    "publication_costs": "23054810",
+    "total_legal_fees_expenses": "23054825",
+    "total_past_due": "22808180"
 }
 
-@app.route("/", methods=["GET"])
-def home():
-    return "Clio Webhook Server Running", 200
+def get_clio_headers():
+    return {
+        "Authorization": f"Bearer {os.environ.get('CLIO_ACCESS_TOKEN')}",
+        "Content-Type": "application/json"
+    }
+
+def get_matter_custom_field(matter_data, field_id):
+    """Helper to extract a custom field value by its ID from the matter payload."""
+    for cf in matter_data.get("custom_field_values", []):
+        if str(cf.get("id")) == str(field_id):
+            val = cf.get("value")
+            return float(val) if val is not None else 0.0
+    return 0.0
+
+def calculate_and_update_matter(matter_id):
+    headers = get_clio_headers()
+    
+    # 1. Fetch full matter details to read current custom field values
+    matter_res = requests.get(f"https://app.clio.com/api/v4/matters/{matter_id}.json?expand=custom_field_values", headers=headers)
+    if matter_res.status_code != 200:
+        print(f"Failed to fetch matter {matter_id}: {matter_res.text}")
+        return
+    
+    matter_data = matter_res.json().get("data", {})
+    
+    # Extract manual fields
+    principal_balance = get_matter_custom_field(matter_data, FIELD_IDS["principal_balance"])
+    total_payments = get_matter_custom_field(matter_data, FIELD_IDS["total_payments"])
+    publication_costs = get_matter_custom_field(matter_data, FIELD_IDS["publication_costs"])
+    
+    # 2. Fetch all billable activities for this matter to sum up billable amounts
+    activities_res = requests.get(f"https://app.clio.com/api/v4/activities.json?matter_id={matter_id}", headers=headers)
+    billable_activities_total = 0.0
+    
+    if activities_res.status_code == 200:
+        activities = activities_res.json().get("data", [])
+        for act in activities:
+            total_val = act.get("total")
+            if total_val:
+                billable_activities_total += float(total_val)
+                
+    # 3. Perform Calculations based on your formulas:
+    # Total Legal Fees & Expenses = Publication Costs + billable activities amount
+    total_legal_fees_expenses = publication_costs + billable_activities_total
+    
+    # Total Past Due = Total Legal Fees & Expenses + Principal Balance - Total Payments
+    total_past_due = total_legal_fees_expenses + principal_balance - total_payments
+    
+    # 4. Push Updated Values Back to Clio
+    payload = {
+        "data": {
+            "custom_field_values": [
+                {
+                    "id": FIELD_IDS["total_legal_fees_expenses"],
+                    "value": round(total_legal_fees_expenses, 2)
+                },
+                {
+                    "id": FIELD_IDS["total_past_due"],
+                    "value": round(total_past_due, 2)
+                }
+            ]
+        }
+    }
+    
+    update_res = requests.patch(
+        f"https://app.clio.com/api/v4/matters/{matter_id}.json",
+        headers=headers,
+        json=payload
+    )
+    
+    print(f"Clio Update Response for Matter {matter_id}: {update_res.status_code} - {update_res.text}")
 
 @app.route("/webhook", methods=["POST"])
-def handle_clio_event():
-    payload = request.json or {}
-    data = payload.get("data", {})
-    matter_id = data.get("matter", {}).get("id")
-    
-    if matter_id and PUBLICATION_COSTS_FIELD_ID and TOTAL_LEGAL_FEES_EXPENSES_FIELD_ID:
-        recalculate_matter_total(matter_id)
+def webhook():
+    event_data = request.json
+    if not event_data:
+        return jsonify({"status": "ignored"}), 400
         
-    return jsonify({"status": "received"}), 200
-
-def recalculate_matter_total(matter_id):
-    matter_res = requests.get(
-        f"{BASE_URL}/matters/{matter_id}.json",
-        headers=HEADERS,
-        params={"fields": "id,custom_field_values{id,value,custom_field{id}}"}
-    )
-    if matter_res.status_code != 200:
-        return
-    matter = matter_res.json().get("data", {})
+    model = event_data.get("model")
+    data = event_data.get("data", {})
     
-    act_res = requests.get(
-        f"{BASE_URL}/activities.json",
-        headers=HEADERS,
-        params={"matter_id": matter_id, "fields": "total"}
-    )
-    if act_res.status_code != 200:
-        return
-    activities = act_res.json().get("data", [])
-    total_billable_activities = sum(float(act.get("total", 0.0)) for act in activities)
-    
-    publication_costs_val = 0.0
-    total_target_instance_id = None
-    
-    for cfv in matter.get("custom_field_values", []):
-        cf_id = cfv["custom_field"]["id"]
-        val = float(cfv.get("value") or 0.0)
+    matter_id = None
+    if model == "Matter":
+        matter_id = data.get("id")
+    elif model == "Activity":
+        matter = data.get("matter", {})
+        matter_id = matter.get("id")
         
-        if cf_id == PUBLICATION_COSTS_FIELD_ID:
-            publication_costs_val = val
-        elif cf_id == TOTAL_LEGAL_FEES_EXPENSES_FIELD_ID:
-            total_target_instance_id = cfv.get("id")
-
-    total_fees_and_expenses = publication_costs_val + total_billable_activities
-
-    cf_data = {
-        "custom_field": {"id": TOTAL_LEGAL_FEES_EXPENSES_FIELD_ID},
-        "value": f"{total_fees_and_expenses:.2f}"
-    }
-    if total_target_instance_id:
-        cf_data["id"] = total_target_instance_id
-
-    requests.patch(
-        f"{BASE_URL}/matters/{matter_id}.json",
-        headers=HEADERS,
-        json={"data": {"custom_field_values": [cf_data]}}
-    )
+    if matter_id:
+        calculate_and_update_matter(matter_id)
+        return jsonify({"status": "success"}), 200
+        
+    return jsonify({"status": "no matter id found"}), 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=10000)
