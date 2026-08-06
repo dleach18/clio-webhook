@@ -17,8 +17,11 @@ def get_access_token():
     })
     return response.json().get("access_token")
 
-@app.route("/", methods=["POST"])
+@app.route("/", methods=["GET", "POST"])
 def webhook():
+    if request.method == "GET":
+        return "Webhook service is live", 200
+
     event_data = request.json
     print("Received webhook event:", event_data)
     
@@ -42,7 +45,7 @@ def webhook():
         "Content-Type": "application/json"
     }
 
-    # 1. Fetch Matter details to retrieve current custom field values (Principal Balance & Publication Costs)
+    # 1. Fetch Matter details to retrieve current custom field values
     matter_res = requests.get(f"https://app.clio.com/api/v4/matters/{matter_id}.json?expand=custom_field_values", headers=headers).json()
     matter_data = matter_res.get("data", {})
     custom_fields = matter_data.get("custom_field_values", [])
@@ -55,9 +58,6 @@ def webhook():
                 return float(val) if val is not None else 0.0
         return 0.0
 
-    # Custom Field IDs:
-    # Principal Balance: 22619285
-    # Publication Costs: 23054810
     principal_balance = get_cf_value(22619285)
     publication_costs = get_cf_value(23054810)
 
@@ -71,11 +71,8 @@ def webhook():
     bills = bills_res.get("data", [])
     total_payments = sum(float(bill.get("paid", 0)) for bill in bills)
 
-    # 4. Perform Exact Calculations
-    # Total Legal Fees & Expenses (ID: 23054825) = Publication Costs + billable activities total
+    # 4. Calculations
     total_legal_fees_and_expenses = publication_costs + total_activities
-
-    # Total Past Due (ID: 22808180) = Total Legal Fees & Expenses + Principal Balance - Total Payments
     total_past_due = total_legal_fees_and_expenses + principal_balance - total_payments
 
     # 5. Push updated values back to Clio Matter custom fields
