@@ -10,6 +10,7 @@ CLIENT_SECRET = os.environ.get("CLIO_CLIENT_SECRET", "xeRvTCO2oiWrbUaYf4J0vTC6Sd
 REFRESH_TOKEN = os.environ.get("CLIO_REFRESH_TOKEN", "ZXbPestqTIiI0oVoc4TTxghmvhCynB3OQmeSy0of")
 
 def get_clio_access_token():
+    global REFRESH_TOKEN
     token_url = "https://app.clio.com/oauth/token"
     payload = {
         "grant_type": "refresh_token",
@@ -19,7 +20,17 @@ def get_clio_access_token():
     }
     response = requests.post(token_url, data=payload)
     if response.status_code == 200:
-        return response.json().get("access_token")
+        token_data = response.json()
+        access_token = token_data.get("access_token")
+        
+        # Clio rotates refresh tokens on use; capture the new one
+        new_refresh_token = token_data.get("refresh_token")
+        if new_refresh_token and new_refresh_token != REFRESH_TOKEN:
+            REFRESH_TOKEN = new_refresh_token
+            print(f"ROTATED REFRESH TOKEN: {REFRESH_TOKEN}", flush=True)
+            
+        return access_token
+        
     print(f"Failed to refresh token: {response.text}", flush=True)
     return None
 
@@ -44,6 +55,7 @@ def handle_webhook():
             
             if access_token:
                 headers = {"Authorization": f"Bearer {access_token}"}
+                
                 # Fetch full matter details including custom fields
                 matter_url = f"https://app.clio.com/api/v4/matters/{matter_id}.json?fields=id,display_number,custom_field_values"
                 matter_res = requests.get(matter_url, headers=headers)
@@ -52,12 +64,60 @@ def handle_webhook():
                     matter_data = matter_res.json().get("data", {})
                     print(f"Matter Data Fetched: {matter_data}", flush=True)
                     
-                    # Process custom fields and calculate balances
                     custom_fields = matter_data.get("custom_field_values", [])
+                    
+                    principal_balance = 0.0
+                    publication_costs = 0.0
+                    total_fees_id = None
+                    total_past_due_id = None
+                    
+                    # Parse custom fields by definition name
                     for field in custom_fields:
-                        print(f"Field: {field}", flush=True)
-                        # Balance calculation logic hooks here
+                        field_def = field.get("field_definition", {})
+                        field_name = field_def.get("name", "").strip()
+                        field_id = field.get("id")
+                        field_value = field.get("value")
                         
+                        print(f"Field Name: '{field_name}', ID: {field_id}, Value: {field_value}", flush=True)
+                        
+                        if "Principal Balance" in field_name:
+                            try:
+                                principal_balance = float(field_value) if field_value else 0.0
+                            except ValueError:
+                                principal_balance = 0.0
+                        elif "Publication Costs" in field_name:
+                            try:
+                                publication_costs = float(field_value) if field_value else 0.0
+                            except ValueError:
+                                publication_costs = 0.0
+                        elif "Total Legal Fees & Expenses" in field_name:
+                            total_fees_id = field_id
+                        elif "Total Past Due" in field_name:
+                            total_past_due_id = field_id
+
+                    # Calculate total balance
+                    calculated_total = principal_balance + publication_costs
+                    print(f"Calculated Total Balance: {calculated_total}", flush=True)
+                    
+                    # Prepare update payload for Clio PATCH request
+                    updates = []
+                    if total_fees_id:
+                        updates.append({"id": total_fees_id, "value": str(calculated_total)})
+                    if total_past_due_id:
+                        updates.append({"id": total_past_due_id, "value": str(calculated_total)})
+                        
+                    if updates:
+                        patch_url = f"https://app.clio.com/api/v4/matters/{matter_id}.json"
+                        patch_payload = {
+                            "matter": {
+                                "custom_field_values": updates
+                            }
+                        }
+                        patch_res = requests.patch(patch_url, json=patch_payload, headers=headers)
+                        if patch_res.status_code == 200:
+                            print(f"Successfully updated custom fields for matter {matter_id}", flush=True)
+                        else:
+                            print(f"Failed to update custom fields: {patch_res.text}", flush=True)
                 else:
                     print(f"Failed to fetch matter: {matter_res.text}", flush=True)
                     
